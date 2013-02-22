@@ -63,6 +63,6 @@ struct scullp_dev *scullp_follow(struct scullp_dev *dev, int n);
 #define SCULLP_IOCXQSET		_IOWR(SCULLP_IOC_MAGIC, 11, int)
 #define SCULLP_IOCHQSET		_IO(SCULLP_IOC_MAGIC, 12)
 
-#define SCULLP_IOC_MAGIC	12
-#define SCULLP_IOCTQSET		_
+#define SCULLP_IOC_MAXNR	12
+
 

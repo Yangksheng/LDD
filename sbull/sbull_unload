@@ -1,0 +1,9 @@
+#!/bin/sh
+
+module="sbull"
+device="sbull"
+
+/sbin/rmmmod $module $* || exit 1
+
+rm -f /dev/${device}[a-d]* /dev/${device}
+

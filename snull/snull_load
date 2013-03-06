@@ -1,0 +1,8 @@
+#!/bin/sh
+
+export PATH=/sbin/:bin
+
+insmod .snull.ko $*
+ifconfig sn0 local0
+ifconfig sn1 local1
+

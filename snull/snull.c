@@ -210,3 +210,175 @@ void snull_rx(struct net_device *dev, struct snull_packet *pkt)
 out:
 	return;
 }
+
+static int snull_poll(struct net_device *dev, int *budget)
+{
+	int npackets = 0, quota = min(dev->quota, *budget);
+	struct sk_buff *skb;
+	struct snull_priv = netdev_priv(dev);
+	struct snull_packet *pkt;
+
+	while(npacket < quota && priv->rx_queue)
+	{
+		pkt = snull_dequeue_buf(dev);
+		sbk = dev_alloc_skb(pkt->datalen +2);
+		if(!skb)
+		{
+			if(printk_ratelimit())
+				printk(KERN_NOTICE"snull:packet dropped\n");
+			priv->stats.rx_dropped++;
+			snull_release_buffer(pkt);
+			continue;
+		}
+		skb_reserve(skb, 2);
+		memecpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
+		skb->dev = dev;
+		skb->protocol = eth_type_trans(skb, dev);
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+		netif_receive_skb(skb);
+
+		npackets++;
+		priv->stats.rx_packets++;
+		priv->stats.rx_bytes += pkt->datalen;
+		snull_release_buf(pkt);
+	}
+	*budget -= npackets;
+	dev->quota -= npackets;
+	if(!priv->rx_queue)
+	{
+		netif_rx_complete(dev);
+		snull_rx_ints(dev, 1);
+		return 0;
+	}
+	return 1;
+}
+
+
+static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+{
+	int statusword;
+	struct snull_priv;
+	struct snull_packet *pkt = NULL;
+
+	struct net_device *dev = (struct net_device *)dev_id;
+	if(!dev)
+		return;
+
+	priv = netdev_priv(dev);
+	spin_lock(&priv->lock);
+
+	statusword = priv->status;
+	priv->status = 0;
+	if(statusword & SNULL_RX_INTR)
+	{
+		pkt = priv->rx_queue;
+		if(pkt)
+		{
+			priv->rx_queue = pkt->next;
+			snull_rx(dev,pkt);
+		}
+	}
+	if(statusword & SNULL_TX_INTR)
+	{
+		priv->status.tx_packets++;
+		priv->status.tx_bytes += priv->tx_packetlen;
+		dev_kfree_skb(priv->skb);
+	}
+
+	spin_unlock(&priv->lock);
+	if(pkt)
+		snull_release_buffer(pkt);
+	return;
+}
+
+static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+{
+	int statusword;
+	struct snull_priv *priv;
+
+	struct net_device *dev = (struct net_device *)dev_id;
+
+	if(!dev)
+		return;
+	priv = netdev_priv(dev);
+	spin_lock(&priv->lock);
+
+	statusword = priv->status;
+	priv->status = 0;
+
+	if(statusword & SNULL_RX_INTR)
+	{
+		snull_rx_ints(dev, 0);
+		netif_rx_schedule(dev);
+	}
+	if(statusword & SNULL_TX_INTR)
+	{
+		priv->stats.tx_packets++;
+		priv->stats.tx_bytes += priv->packetlen;
+		dev_kfree_skb(priv->skb);
+	}
+	spin_unlock(&priv->lock);
+	return;
+}
+
+static void snull_hw_tx(char *buf, int len, struct net_device *dev)
+{
+	struct iphdr *ih;
+	struct net_device *dest;
+	struct snull_priv *priv;
+	u32 *saddr, *daddr;
+	struct snull_packet *tx_buffer;
+
+	if(len < sizeof(struct ethhdr) + sizeof(struct iphdr))
+	{
+		printk("snull: Hmm... acket toot short (%i octets)\n",len);
+		return;
+	}
+
+	if(1)
+	{
+		int i;
+		PDEBUG("len is %i\n"KERN_DEBUG"data:"len);
+		for(i = 14; i < len; i++)
+			printk(" %02x", buf[i]&0xff);
+		printk("\n");
+	}
+
+	ih = (struct iphdr *)(buf + sizeof(struct ethhdr));
+	saddr = &ih->saddr;
+	daddr = &ih->daddr;
+
+	((u8 *)saddr)[2] ^= 1;
+	((u8 *)daddr)[2] ^= 1;
+
+	ih->check = 0;
+	ih->check = ip_fast_csum((unsigned char *)ih, ih->ihl);
+
+	if(dev == snull_devs[0])
+		PDEBUG("%08x:%05i --> %08x:%05i\n", ntohl(ih->saddr), ntohl(((struct tcphdr *)(ih+1))->source), ntohl(ih->daddr), ntohl(((struct tcphdr *)(ih+1))->dest));
+	else
+		PDEBUG("%08x:%05i <-- %08x:%05i\n", ntohl(ih->daddr), ntohl(((struct tcphdr *)(ih+1))->dest), ntohl(ih->saddr), ntohl(((struct tcphdr *)(ih+1))->source));
+
+	dest = snull_devs[dev == snull_devs[0] ? 1 : 0];
+	priv = netdev_priv(dev);
+	tx_buffer = snull_get_tx_buffer(dev);
+	tx_buffer->datalen = len;
+	memcpy(tx_buffer->data, buf, len);
+	snull_enqueue_buf(dest, tx_buffer);
+	if(priv->rx_in_enabled)
+	{
+		priv->status |= SNULL_RX_INTR;
+		snull_interrupt(0, dest, NULL);
+	}
+	priv = netdev_priv(dev);
+	priv->tx_packetlen = len;
+	priv->tx_packetdata = buf;
+	priv->status |= SNULL_TX_INTR;
+	if(lockup && ((priv->stats.tx_packets +1) % lockup) == 0)
+	{
+		netif_stop_queue(dev);
+		PDEBUG("Simulate lockup at %ld, txp %ld\n", jiffies, (unsigned long)priv->stats.tx_packets);
+	}
+	else
+		snull_interrupt(0, dev, NULL);
+}

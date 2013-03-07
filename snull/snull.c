@@ -59,3 +59,99 @@ struct snull_priv
 static void snull_tx_timeout(struct net_device *dev);
 static void (*snull_interrupt)(int, void *, struct pt_regs *);
 
+void snull_setup_pool(struct net_device *dev)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	int i;
+	struct snull_packet *pkt;
+
+	priv->ppool = NULL;
+	for(i = 0; i < pool_size; i++)
+	{
+		pkt = kmalloc(sizeof(struct snull_packet), GFP_KERNEL);
+		if(pkt == NULL)
+		{
+			printk(KERN_NOTICE"Ran out of memory allocating packet pool\n");
+			return;
+		}
+		pkt->dev = dev;
+		pkt->next = priv->ppool;
+		priv->ppool = pkt;
+	}
+}
+
+void snull_teardown_pool(struct net_device *dev)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	struct snull_packet *pkt;
+
+	while((pkt = priv->ppool))
+	{
+		priv->ppool = pkt->next;
+		kfree(pkt);
+	}
+}
+
+struct snull_packet *snull_get_tx_buffer(struct net_device *dev)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	unsigned long flags;
+	struct snull_packet *pkt;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	pkt = priv->ppool;
+	priv->ppool = pkt->next;
+	if(priv->ppool == NULL)
+	{
+		printk(KERN_INFO"Pool empty\n");
+		netif_stop_queue(dev);
+	}
+	spin_unlock_irqrestore(&priv->lock, flags);
+	return pkt;
+}
+
+void snull_release_buffer(struct snull_packet *pkt)
+{
+	unsigned long flags;
+	struct snull_priv *priv = netdev_priv(pkt->dev);
+	spin_lock_irqsave(&priv->lock, flags);
+	pkt->next = priv->ppool;
+	priv->ppool = pkt;
+	spin_unlock_irqrestore(&priv->lock, flags);
+	if(netif_queue_stopped(pkt->dev) && pkt->next == NULL)
+		netif_wake_queue(pkt->dev);
+}
+
+void snull_enqueue_buf(struct net_device *dev, struct snull_packet *pkt)
+{
+	unsigned long flags;
+	struct snull_priv *priv = netdev_priv(dev);
+
+	spin_lock_irqsave(&priv->lock, flags);
+	pkt->next = priv->rx_queue;
+	priv->rx_queue = pkt;
+	spin_unlock_irqrestore(&priv->lock, flags);
+}
+
+struct snull_packet *snull_dequeue_buf(struct net_device *dev)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	struct snull_packet *pkt;
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->lock, flags);
+	pkt = priv->rx_queue;
+	if(pkt != NULL)
+		priv->rx_queue = pkt->next;
+	spin_unlock_restore(&priv->lock, flags);
+	return pkt;
+}
+
+
+static void snull_rx_ints(struct net_device *dev, int enable)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	priv->rx_int_enabled = enable;
+}
+
+

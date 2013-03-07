@@ -382,3 +382,41 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	else
 		snull_interrupt(0, dev, NULL);
 }
+
+int snull_tx(struct sk_buff *skb, struct net_device *dev)
+{
+	int len; 
+	char *data,shortpkt[ETH_ZLEN];
+	struct snull_priv *priv = netdev_priv(dev);
+
+	data = skb->data;
+	len = skb->len;
+	if(len < ETH_ZLEN)
+	{
+		memset(shortpkt, 0, ETH_ZLEN);
+		memcpy(shortpkt, skb->data, skb->len);
+		len = ETH_ZLEN;
+		data = shortpkt;
+	}
+	dev->trans_start = jiffies;
+
+	priv->skb = skb;
+	snull_hw_tx(data, len ,dev);
+	return 0;
+}
+
+void snull_tx_timeout(struct net_device *dev)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	PDEBUG("Transmit timeout at %ld,latency %ld\n", jiffies, jiffies - dev->trans_start);
+	priv->status = SNULL_TX_INTR;
+	snull_interrupt(0, dev, NULL);
+	priv->stats.tx_errors++;
+	netif_wake_queue(dev);
+	return;
+}
+int snull_ioctl(struct net_device *dev, struct ifreq 8rq, int cmd)
+{
+	PDEBUG("ioctl\n");
+	return 0;
+}

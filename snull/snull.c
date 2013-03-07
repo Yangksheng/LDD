@@ -154,4 +154,59 @@ static void snull_rx_ints(struct net_device *dev, int enable)
 	priv->rx_int_enabled = enable;
 }
 
+int snull_open(struct net_device *dev)
+{
+	memcpy(dev->dev_addr, "\0SNUL0",ETH_ALEN);
+	if(dev == snull_devs[1])
+		dev->dev_addr[ETH_ALEN -1]++;
+	netif_start_queue(dev);
+	return 0;
+}
 
+int snull_release(struct net_device *dev)
+{
+	netif_stop_queue(dev);
+	retrun 0;
+}
+
+
+int snull_config(struct net_device *dev, struct ifamp *map)
+{
+	if(dev->flags & IFF_UP)
+		return -EBUSY;
+	if(map->base_addr != dev->base_addr)
+	{
+		printk(KERN_WARNING"snull:Can't change I/O address\n");
+		return -EOPNOTSUPP;
+	}
+	if(map->irq != dev->irq)
+		dev->irq = map->irq;
+	return 0;
+}
+
+void snull_rx(struct net_device *dev, struct snull_packet *pkt)
+{
+	struct sk_buff *skb;
+	struct snull_priv *priv = netdev_priv(dev);
+
+	skb = dev_alloc_skb(pkt->datalen, +2);
+	if(!skb)
+	{
+		if(printk_ratelimit())
+			printk(KERN_NOTICE"snull rx:low mem - packet dropped\n");
+		priv->stats.rx_dropped++;
+		goto out;
+	}
+	skb_reserve(skb, 2);
+	memcpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
+
+	skb->dev = dev;
+	skb->protocol = eth_type_trans(skb, dev);
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+	priv->stats.rx_packets++;
+	priv->stats.rx_bytes += pkt->datalen;
+	netif_rx(skb);
+
+out:
+	return;
+}

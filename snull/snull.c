@@ -420,3 +420,55 @@ int snull_ioctl(struct net_device *dev, struct ifreq 8rq, int cmd)
 	PDEBUG("ioctl\n");
 	return 0;
 }
+
+struct snull_device_stats *snull_stats(struct net_device *dev)
+{
+	struct snull_priv *priv = netdev_priv(dev);
+	return &priv->stats;
+}
+
+int snull_rebuild_header(struct sk_buff *skb)
+{
+	struct ethhdr *eth = (struct ethhdr *)skb->data;
+	struct net_device *dev = skb->dev;
+
+	memcpy(eth->h_source, dev->dev_addr, dev->addr_len);
+	memcpy(eth->h_dest, dev->dev_addr, dev->addrlen);
+	eth->h_dest[ETH_ALEN-1] ^= 0x01;
+	return 0;
+}
+
+int snull_header(struct sk_buff *skb, struct net_device *dev, unsigned short type, void *daddr, void *saddr, unsigned int len)
+{
+	struct ethhdr *eth = (struct ethhdr *)skb_push(skb, ETH_HLEN);
+
+	eth->h_proto = htons(type);
+	memcpy(eth->h_source, saddr ? saddr : dev->dev_addr, dev->addr_len);
+	memcpy(eth->h_dest, daddr ? daddr : dev->dev_addr, dev->addr_len);
+	eth->h_dest[ETH_ALEN-1] ^= 0x01;
+	return dev->hard_header_len;
+}
+
+int snull_change_mtu(struct net_device *dev, int new_mtu)
+{
+	unsigned long flags;
+	struct snull_priv *priv = netdev_priv(dev);
+	spinlock_t *lock = &priv->lock;
+
+	if((new_mtu < 68) || (new_mtu > 1500))
+		return -EINVAL;
+
+	spin_lock_irqsave(lock, flags);
+	dev->mtu = new_mtu;
+	spin_unlock_irqrestore(lock, flags);
+	return 0;
+}
+
+void snull_init(struct net_device *dev)
+{
+	struct snull_priv *priv;
+
+	ether_setup(dev);
+
+
+}

@@ -6,15 +6,15 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
-#include <linux/typeds.h>
+#include <linux/types.h>
 #include <linux/interrupt.h>
 
 #include <linux/in.h>
-#include <linux/netdevices.h>
+#include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
-#include <linux/sbbuff.h>
+#include <linux/skbuff.h>
 
 #include "snull.h"
 #include <linux/in6.h>
@@ -22,8 +22,8 @@
 
 MODULE_LICENSE("GPL");
 
-static int lookup = 0;
-module_param(lookup, int, 0);
+static int lockup = 0;
+module_param(lockup, int, 0);
 
 static int timeout = SNULL_TIMEOUT;
 module_param(timeout, int, 0);
@@ -53,6 +53,8 @@ struct snull_priv
 	u8 *tx_packetdata;
 	struct sk_buff *skb;
 	spinlock_t lock;
+	struct napi_struct napi;
+	struct net_device *dev;
 };
 
 
@@ -143,7 +145,7 @@ struct snull_packet *snull_dequeue_buf(struct net_device *dev)
 	pkt = priv->rx_queue;
 	if(pkt != NULL)
 		priv->rx_queue = pkt->next;
-	spin_unlock_restore(&priv->lock, flags);
+	spin_unlock_irqrestore(&priv->lock, flags);
 	return pkt;
 }
 
@@ -166,11 +168,11 @@ int snull_open(struct net_device *dev)
 int snull_release(struct net_device *dev)
 {
 	netif_stop_queue(dev);
-	retrun 0;
+	return 0;
 }
 
 
-int snull_config(struct net_device *dev, struct ifamp *map)
+int snull_config(struct net_device *dev, struct ifmap *map)
 {
 	if(dev->flags & IFF_UP)
 		return -EBUSY;
@@ -189,7 +191,7 @@ void snull_rx(struct net_device *dev, struct snull_packet *pkt)
 	struct sk_buff *skb;
 	struct snull_priv *priv = netdev_priv(dev);
 
-	skb = dev_alloc_skb(pkt->datalen, +2);
+	skb = dev_alloc_skb(pkt->datalen +2);
 	if(!skb)
 	{
 		if(printk_ratelimit())
@@ -211,17 +213,18 @@ out:
 	return;
 }
 
-static int snull_poll(struct net_device *dev, int *budget)
+static int snull_poll(struct napi_struct *napi, int budget)
 {
-	int npackets = 0, quota = min(dev->quota, *budget);
+	int npackets = 0, quota = budget;
 	struct sk_buff *skb;
-	struct snull_priv = netdev_priv(dev);
+	struct snull_priv *priv = container_of(napi, struct snull_priv, napi);
+	struct net_device *dev = priv->dev;
 	struct snull_packet *pkt;
 
-	while(npacket < quota && priv->rx_queue)
+	while(npackets < quota && priv->rx_queue)
 	{
 		pkt = snull_dequeue_buf(dev);
-		sbk = dev_alloc_skb(pkt->datalen +2);
+		skb = dev_alloc_skb(pkt->datalen +2);
 		if(!skb)
 		{
 			if(printk_ratelimit())
@@ -231,7 +234,7 @@ static int snull_poll(struct net_device *dev, int *budget)
 			continue;
 		}
 		skb_reserve(skb, 2);
-		memecpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
+		memcpy(skb_put(skb, pkt->datalen), pkt->data, pkt->datalen);
 		skb->dev = dev;
 		skb->protocol = eth_type_trans(skb, dev);
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
@@ -240,13 +243,12 @@ static int snull_poll(struct net_device *dev, int *budget)
 		npackets++;
 		priv->stats.rx_packets++;
 		priv->stats.rx_bytes += pkt->datalen;
-		snull_release_buf(pkt);
+		snull_release_buffer(pkt);
 	}
-	*budget -= npackets;
-	dev->quota -= npackets;
+	budget -= npackets;
 	if(!priv->rx_queue)
 	{
-		netif_rx_complete(dev);
+		napi_complete(&priv->napi);
 		snull_rx_ints(dev, 1);
 		return 0;
 	}
@@ -257,7 +259,7 @@ static int snull_poll(struct net_device *dev, int *budget)
 static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int statusword;
-	struct snull_priv;
+	struct snull_priv *priv;
 	struct snull_packet *pkt = NULL;
 
 	struct net_device *dev = (struct net_device *)dev_id;
@@ -280,8 +282,8 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 	if(statusword & SNULL_TX_INTR)
 	{
-		priv->status.tx_packets++;
-		priv->status.tx_bytes += priv->tx_packetlen;
+		priv->stats.tx_packets++;
+		priv->stats.tx_bytes += priv->tx_packetlen;
 		dev_kfree_skb(priv->skb);
 	}
 
@@ -309,12 +311,12 @@ static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	if(statusword & SNULL_RX_INTR)
 	{
 		snull_rx_ints(dev, 0);
-		netif_rx_schedule(dev);
+		napi_schedule(&priv->napi);
 	}
 	if(statusword & SNULL_TX_INTR)
 	{
 		priv->stats.tx_packets++;
-		priv->stats.tx_bytes += priv->packetlen;
+		priv->stats.tx_bytes += priv->tx_packetlen;
 		dev_kfree_skb(priv->skb);
 	}
 	spin_unlock(&priv->lock);
@@ -338,7 +340,7 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	if(1)
 	{
 		int i;
-		PDEBUG("len is %i\n"KERN_DEBUG"data:"len);
+		PDEBUG("len is %i\n data:"len);
 		for(i = 14; i < len; i++)
 			printk(" %02x", buf[i]&0xff);
 		printk("\n");
@@ -347,10 +349,15 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	ih = (struct iphdr *)(buf + sizeof(struct ethhdr));
 	saddr = &ih->saddr;
 	daddr = &ih->daddr;
+	printk(KERN_WARNING"saddr:%u\n",saddr);
+	printk(KERN_WARNING"daddr:%u\n",daddr);
 
 	((u8 *)saddr)[2] ^= 1;
 	((u8 *)daddr)[2] ^= 1;
 
+	printk("saddr:%u\n",saddr);
+	printk("daddr:%u\n",daddr);
+	
 	ih->check = 0;
 	ih->check = ip_fast_csum((unsigned char *)ih, ih->ihl);
 
@@ -365,7 +372,7 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	tx_buffer->datalen = len;
 	memcpy(tx_buffer->data, buf, len);
 	snull_enqueue_buf(dest, tx_buffer);
-	if(priv->rx_in_enabled)
+	if(priv->rx_int_enabled)
 	{
 		priv->status |= SNULL_RX_INTR;
 		snull_interrupt(0, dest, NULL);
@@ -415,16 +422,16 @@ void snull_tx_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 	return;
 }
-int snull_ioctl(struct net_device *dev, struct ifreq 8rq, int cmd)
+int snull_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
 	PDEBUG("ioctl\n");
 	return 0;
 }
 
-struct snull_device_stats *snull_stats(struct net_device *dev)
+struct net_device_stats *snull_stats(struct net_device *dev)
 {
 	struct snull_priv *priv = netdev_priv(dev);
-	return &priv->stats;
+	return (&priv->stats);
 }
 
 int snull_rebuild_header(struct sk_buff *skb)
@@ -433,12 +440,12 @@ int snull_rebuild_header(struct sk_buff *skb)
 	struct net_device *dev = skb->dev;
 
 	memcpy(eth->h_source, dev->dev_addr, dev->addr_len);
-	memcpy(eth->h_dest, dev->dev_addr, dev->addrlen);
+	memcpy(eth->h_dest, dev->dev_addr, dev->addr_len);
 	eth->h_dest[ETH_ALEN-1] ^= 0x01;
 	return 0;
 }
 
-int snull_header(struct sk_buff *skb, struct net_device *dev, unsigned short type, void *daddr, void *saddr, unsigned int len)
+int snull_header(struct sk_buff *skb, struct net_device *dev, unsigned short type, const void *daddr, const void *saddr, unsigned len)
 {
 	struct ethhdr *eth = (struct ethhdr *)skb_push(skb, ETH_HLEN);
 
@@ -464,11 +471,91 @@ int snull_change_mtu(struct net_device *dev, int new_mtu)
 	return 0;
 }
 
+
+static const struct header_ops snull_header_ops =
+{
+	.rebuild = snull_rebuild_header,
+	.create  = snull_header,
+	.cache = NULL,
+	
+};
+static const struct net_device_ops snull_ops = 
+{
+	.ndo_open = snull_open,
+	.ndo_stop = snull_release,
+	.ndo_set_config = snull_config,
+	.ndo_start_xmit = snull_tx,
+	.ndo_do_ioctl = snull_ioctl,
+	.ndo_get_stats = snull_stats,
+	.ndo_change_mtu = snull_change_mtu,
+	.ndo_tx_timeout = snull_tx_timeout,
+
+};
 void snull_init(struct net_device *dev)
 {
 	struct snull_priv *priv;
 
 	ether_setup(dev);
+	dev->netdev_ops = &snull_ops;
+	dev->header_ops = &snull_header_ops;
+	dev->watchdog_timeo = timeout;
+	dev->flags |= IFF_NOARP;
+	dev->features |= NETIF_F_NO_CSUM;
 
+	priv = netdev_priv(dev);
+	memset(priv, 0, sizeof(struct snull_priv));
+	priv->dev = dev;
+	spin_lock_init(&priv->lock);
+	snull_rx_ints(dev, 1);
+	snull_setup_pool(dev);
+	if(use_napi)
+	{
+		netif_napi_add(dev, &priv->napi, snull_poll, 2);
+	}
 
 }
+
+struct net_device *snull_devs[2];
+
+void snull_cleanup(void)
+{
+	int i;
+
+	for(i = 0; i < 2; i++)
+	{
+		if(snull_devs[i])
+		{
+			unregister_netdev(snull_devs[i]);
+			snull_teardown_pool(snull_devs[i]);
+			free_netdev(snull_devs[i]);
+		}
+	}
+	return;
+}
+
+int snull_init_module(void)
+{
+	int result, i, ret = -ENOMEM;
+
+	snull_interrupt = use_napi ? snull_napi_interrupt : snull_regular_interrupt;
+	snull_devs[0] = alloc_netdev(sizeof(struct snull_priv), "sn%d", snull_init);
+	snull_devs[1] = alloc_netdev(sizeof(struct snull_priv), "sn%d",snull_init);
+	if(snull_devs[0] == NULL || snull_devs[1] == NULL)
+		goto out;
+	ret = -ENODEV;
+	for(i = 0; i < 2; i++)
+	{
+		if((result = register_netdev(snull_devs[i])))
+			printk("snull: error %i registering device\"%s\"\n", result, snull_devs[i]->name);
+		else
+			ret = 0;
+		
+	}
+out:
+	if(ret)
+		snull_cleanup();
+	return ret;
+}
+
+module_init(snull_init_module);
+module_exit(snull_cleanup);

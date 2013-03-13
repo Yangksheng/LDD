@@ -332,3 +332,162 @@ static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cm
 
 }
 #undef tiny_ioctl
+
+#define tiny_ioctl tiny_ioctl_tiocmiwait
+static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct tiny_serial *tiny = tty->driver_data;
+
+	if(cmd == TIOCMWAIT)
+	{
+		DECLARE_WAITQUEUE(wait, current);
+		struct async_icount cnow;
+		struct async_icount cprev;
+		cprev = tiny->icount;
+		while(1)
+		{
+			add_wait_queue(&tiny->wait, &wait);
+			set_current_state(TASK_INTERRUPTIBLE);
+			schedule();
+			remove_wait_queue(&tiny->wait, &wait);
+			if(signal_pending(current))
+				return -ERESTARTSYS;
+
+			cnow = tiny->icount;
+			if(cnow.rng == cprev.rng && cnow.dsr == cprev.dsr && cnow.dcd == cprev.dcd && cnow.cts == cprev.cts)
+				return -EIO;
+			if(((arg & TIOCM_RNG) && (cnow.rng != cprev.rng)) ||
+			   ((arg & TIOCM_DSR) && (cnow.dsr != cprev.dsr)) ||
+			   ((arg & TIOCM_CD)  && (cnow.dcd != cprev.dcd)) ||
+			   ((arg & TIOCM_CTS) && (cnow.cts != cprev.cts)))
+			{
+				return 0;
+			}
+			cprev = cnow;
+
+		}
+	}
+	return -ENOIOCTLCMD;
+}
+
+#undef tiny_ioctl
+#define tiny_ioctl tiny_ioctl_tiocgicount
+static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct tiny_serial *tiny = tty->driver_data;
+	if(cmd == TIOCGICOUNT)
+	{
+		struct async_icount cnow = tiny->icount;
+		struct serial_icounter_struct icount;
+
+		icount.cts	= cnow.cts;
+		icount.dsr	= cnow.dsr;
+		icount.rng	= cnow.rng;
+		icount.dcd	= cnow.dcd;
+		icount.rx	= cnow.rx;
+		icount.tx	= cnow.tx;
+		icount.frame	= cnow.frame;
+		icount.overrun	= cnow.overrun;
+		icount.parity	= cnow.parity;
+		icount.brk		= cnow.brk;
+		icount.buf_overrun	= cnow.buf_overrun;
+
+		if(copy_to_user((void __user *)arg, &icount, sizeof(Icount)))
+			return -EFAULT;
+		return 0;
+	}
+	return -ENOIOCTLCMD;
+}
+#undef tiny_ioctl
+static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cmd, unsigned long arg)
+{
+	switch(cmd)
+	{
+		case TIOCGSERIAL:
+			return tiny_ioctl_tiocgserial(tty, file, cmd, arg);
+		case TIOCMIWAIT:
+			return tiny_ioctl_tiocmiwait(tty, file, cmd, arg);
+		case TIOCGICOUNT:
+			return tiny_ioctl_tiocgicount(tty, file, cmd, arg);
+	}
+	return -ENOIOCTLCMD;
+}
+
+static struct tty_operations serial_ops = 
+{
+	.open	= tiny_open,
+	.close	= tiny_close,
+	.write	= tiny_write,
+	.write_room = tiny_write_room,
+	.set_termios = tiny_set_termios,
+	
+};
+
+static struct tty_driver *tiny_tty_driver;
+
+static int __init tiny_init(void)
+{
+	int retval ;
+	int i;
+
+	tiny_tty_driver = alloc_tty_driver(TINY_TTY_MINORS);
+	if(!tiny_tty_driver)
+		return -ENOMEM;
+
+	tiny_tty_driver->owner = THIS_MODULE;
+	tiny_tty_driver->driver_name = "tiny_tty";
+	tiny_tty_driver->name = "ttty";
+	tiny_tty_driver->devfs_name = "tts/ttty%d";
+	tiny_tty_driver->major = TINY_TTY_MAJOR;
+	tiny_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	tiny_tty_driver->subtype = SERIAL_TYPE_NORMAL;
+	tiny_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
+	tiny_tty_driver->init_termios = tty_std_termios;
+	tiny_tty_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+	tty_set_operatios(tiny_tty_driver, &serial_ops);
+
+	tiny_tty_driver->read_proc = tiny_read_proc;
+	tiny_tty_driver->tiocmget	= tiny_tiocmget;
+	tiny_tty_driver->tiocmset	= tiny->tiocmset;
+	tiny_tty_driver->ioctl		= tiny_ioctl;
+
+	retval = tty_register_driver(tiny_tty_driver);
+	if(retval)
+	{
+		printk(KERN_ERR"failed to register tiny tty driver");
+		put_tty_driver(tiny_tty_driver);
+		return retval;
+	}
+
+	for(i = 0; i < TINY_TTY_MINORS; i++)
+		tty_register_device(tiny_tty_driver);
+	printk(KERN_INFO " tiny serila v1.0 by ksheng");
+	return retval;
+
+}
+
+static void __exit tiny_exit(void)
+{
+	struct tiny_serial *tiny;
+	int i;
+	for(i = 0; i < TINY_TTY_MINORS; i++)
+		tty_unregister_device(tiny_tty_driver, i);
+	tty_unregister_driver(tiny_tty_driver);
+
+	for(i = 0; i < TINY_TTY_MINORS; i++)
+	{
+		tiny = tiny_table[i];
+		if(tiny)
+		{
+			while(tiny->open_count)
+				do_close(tiny);
+			del_timer(tiny->timer);
+			kfree(tiny->timer);
+			kfree(tiny);
+			tiny_table[i] = NULL;
+		}
+	}
+}
+
+module_init(tiny_init);
+module_exit(tiny_exit);

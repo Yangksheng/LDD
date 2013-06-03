@@ -1,0 +1,9 @@
+let g:netrw_dirhistmax  =10
+let g:netrw_dirhist_cnt =7
+let g:netrw_dirhist_1='/work/u-boot-1.1.6/cpu/arm920t/s3c24x0'
+let g:netrw_dirhist_2='/home/ksheng/.config/compiz-1'
+let g:netrw_dirhist_3='/home/ksheng/.config/compiz-1/compizconfig'
+let g:netrw_dirhist_4='/work/unix'
+let g:netrw_dirhist_5='/var/log'
+let g:netrw_dirhist_6='/home/ksheng/.config/fcitx'
+let g:netrw_dirhist_7='/home/ksheng/.vim/template/c'

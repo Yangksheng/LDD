@@ -9,6 +9,10 @@
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
 #include <asm/uaccess.h>
+#include <asm/irq.h>
+#include <linux/delay.h>
+#include <linux/sched.h>
+
 
 MODULE_LICENSE("GPL");
 
@@ -22,7 +26,7 @@ struct tiny_serial
 	struct tty_struct *tty;
 	int		open_count;
 	struct semaphore	sem;
-	struct timer_list *time;
+	struct timer_list *timer;
 
 	int msr;
 	int mcr;
@@ -45,11 +49,11 @@ static void tiny_timer(unsigned long timer_data)
 	tty = tiny->tty;
 	for(i = 0; i < data_size; i++)
 	{
-		if(tty->flip.count >= TTY_FLIPBUF_SIZE)
+		if(tty_buffer_request_room(tty, i) > i)
 			tty_flip_buffer_push(tty);
 		tty_insert_flip_char(tty, data[i], TTY_NORMAL);
 	}
-	tty->timer->expires = jiffies + DELAY_TIME:
+	tiny->timer->expires = jiffies + DELAY_TIME;
 	add_timer(tiny->timer);
 }
 
@@ -69,7 +73,7 @@ static int tiny_open(struct tty_struct *tty, struct file *file)
 			return -ENOMEM;
 		init_MUTEX(&tiny->sem);
 		tiny->open_count = 0;
-		tiny_timer = NULL;
+		tiny->timer = NULL;
 		tiny_table[index] = tiny;
 	}
 	down(&tiny->sem);
@@ -120,7 +124,7 @@ static void tiny_close(struct tty_struct *tty, struct file *file)
 		do_close(tiny);
 }
 
-static tiny_write(struct tty_struct *tty, const unsigned char *buffer, int count)
+static int tiny_write(struct tty_struct *tty, const unsigned char *buffer, int count)
 {
 	struct tiny_serial *tiny = tty->driver_data;
 	int i;
@@ -161,13 +165,13 @@ exit:
 }
 
 #define RELEVANT_IFLAG(iflag) ((iflag) & (IGNBRK|BRKINT|IGNPAR|PARMRK|INPCK))
-static void tiny_set_termios(struct tty_struct *tty, struct termios *old_termios)
+static void tiny_set_termios(struct tty_struct *tty, struct ktermios *old_termios)
 {
 	unsigned int cflag;
-	cflag = tty->termios->c_flag;
+	cflag = tty->termios->c_cflag;
 	if(old_termios)
 	{
-		if((cflag == old_termios->cflag) &&
+		if((cflag == old_termios->c_cflag) &&
 		(RELEVANT_IFLAG(tty->termios->c_iflag) ==
 		RELEVANT_IFLAG(old_termios->c_iflag)))
 		{
@@ -192,7 +196,7 @@ static void tiny_set_termios(struct tty_struct *tty, struct termios *old_termios
 
 	}
 	if(cflag & PARENB)
-		if(cflag & PAROOD)
+		if(cflag & PARODD)
 			printk(KERN_DEBUG" - parity = odd\n");
 		else
 			printk(KERN_DEBUG" - parity = even\n");
@@ -222,7 +226,7 @@ static void tiny_set_termios(struct tty_struct *tty, struct termios *old_termios
 		else
 			printk(KERN_DEBUG" - INBOUND XON/XOFF is disabled");
 	}
-	prink(KERN_DEBUG" - baud rate = %d", tty_get_baud_rate(tty));
+	printk(KERN_DEBUG" - baud rate = %d", tty_get_baud_rate(tty));
 }
 
 #define MCR_DTR		0x01
@@ -300,7 +304,7 @@ done:
 	return (count < begin+length-off) ? count : begin + length-off;
 }
 
-#define tiny_ioctl tiny_ioctl_tiocgetserial
+#define tiny_ioctl tiny_ioctl_tiocgserial
 static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct tiny_serial *tiny = tty->driver_data;
@@ -317,10 +321,11 @@ static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cm
 		tmp.port		= tiny->serial.port;
 		tmp.irq			= tiny->serial.irq;
 		tmp.flags		= ASYNC_SKIP_TEST | ASYNC_AUTO_IRQ;
-		tmp.xmit.fifo_size = tiny->serial.xmit_fifo_size;
+		tmp.xmit_fifo_size = tiny->serial.xmit_fifo_size;
 		tmp.baud_base	= tiny->serial.baud_base;
 		tmp.close_delay = 5 * HZ;
-		tmp.close_divisor = tiny->serial.custom_divisor;
+		tmp.closing_wait	= 30*HZ;
+		tmp.custom_divisor = tiny->serial.custom_divisor;
 		tmp.hub6		= tiny->serial.hub6;
 		tmp.io_type		= tiny->serial.io_type;
 
@@ -338,7 +343,7 @@ static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cm
 {
 	struct tiny_serial *tiny = tty->driver_data;
 
-	if(cmd == TIOCMWAIT)
+	if(cmd == TIOCMIWAIT)
 	{
 		DECLARE_WAITQUEUE(wait, current);
 		struct async_icount cnow;
@@ -392,7 +397,7 @@ static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cm
 		icount.brk		= cnow.brk;
 		icount.buf_overrun	= cnow.buf_overrun;
 
-		if(copy_to_user((void __user *)arg, &icount, sizeof(Icount)))
+		if(copy_to_user((void __user *)arg, &icount, sizeof(icount)))
 			return -EFAULT;
 		return 0;
 	}
@@ -413,6 +418,7 @@ static int tiny_ioctl(struct tty_struct *tty, struct file *file, unsigned int cm
 	return -ENOIOCTLCMD;
 }
 
+
 static struct tty_operations serial_ops = 
 {
 	.open	= tiny_open,
@@ -420,6 +426,10 @@ static struct tty_operations serial_ops =
 	.write	= tiny_write,
 	.write_room = tiny_write_room,
 	.set_termios = tiny_set_termios,
+	.tiocmget	= tiny_tiocmget,
+	.tiocmset	= tiny_tiocmset,
+	.ioctl		= tiny_ioctl,
+//	.proc_fops	= &serial_proc_ops
 	
 };
 
@@ -437,20 +447,14 @@ static int __init tiny_init(void)
 	tiny_tty_driver->owner = THIS_MODULE;
 	tiny_tty_driver->driver_name = "tiny_tty";
 	tiny_tty_driver->name = "ttty";
-	tiny_tty_driver->devfs_name = "tts/ttty%d";
+//	tiny_tty_driver->dev_name = "tts/ttty%d";
 	tiny_tty_driver->major = TINY_TTY_MAJOR;
 	tiny_tty_driver->type = TTY_DRIVER_TYPE_SERIAL;
 	tiny_tty_driver->subtype = SERIAL_TYPE_NORMAL;
-	tiny_tty_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
+	tiny_tty_driver->flags = TTY_DRIVER_REAL_RAW ;
 	tiny_tty_driver->init_termios = tty_std_termios;
 	tiny_tty_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	tty_set_operatios(tiny_tty_driver, &serial_ops);
-
-	tiny_tty_driver->read_proc = tiny_read_proc;
-	tiny_tty_driver->tiocmget	= tiny_tiocmget;
-	tiny_tty_driver->tiocmset	= tiny->tiocmset;
-	tiny_tty_driver->ioctl		= tiny_ioctl;
-
+	tty_set_operations(tiny_tty_driver, &serial_ops);
 	retval = tty_register_driver(tiny_tty_driver);
 	if(retval)
 	{
@@ -460,7 +464,7 @@ static int __init tiny_init(void)
 	}
 
 	for(i = 0; i < TINY_TTY_MINORS; i++)
-		tty_register_device(tiny_tty_driver);
+		tty_register_device(tiny_tty_driver, i, NULL);
 	printk(KERN_INFO " tiny serila v1.0 by ksheng");
 	return retval;
 
